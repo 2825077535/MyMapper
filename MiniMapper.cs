@@ -1,45 +1,180 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace MyMapper
 {
-    public static class MiniMapper
+    public class MiniMapper
     {
+        private readonly MappingConfiguration _mappingConfig;
+        private readonly IServiceProvider? _serviceProvider;
+        private readonly Dictionary<Type, ConstructorInfo> _ctorCache = new();
+
+        public MiniMapper(MappingConfiguration mappingConfig, IServiceProvider? serviceProvider = null)
+        {
+            _mappingConfig = mappingConfig;
+            _serviceProvider = serviceProvider;
+        }
+
         /// <summary>
-        /// 基础的对象映射方法，支持同名同类型属性的映射，并且可以通过MapperIgnoreAttribute特性来忽略某些属性的映射。
+        /// 核心映射方法（有规则用规则，无规则默认匹配）
         /// </summary>
-        /// <typeparam name="TSource">源类型</typeparam>
-        /// <typeparam name="TDestination">目标类型</typeparam>
-        /// <param name="source"></param>
-        /// <returns></returns>
-        /// <exception cref="ArgumentNullException"></exception>
-        public static TDestination Map<TSource, TDestination>(TSource source)
-            where TDestination : new()
-            // 约束目标类型必须有无参构造函数，由于外部工具并不知道构造函数的信息内容，
-            // 如果不约束无参构造，那么需要另外定义具体的传参构造。
-            // 对于外部工具来说，由于对构造的信息不了解，所以只能约束目标类型必须有无参构造函数，这样才能通过反射创建目标对象的实例。
+        public TDestination Map<TSource, TDestination>(TSource source)
         {
             if (source == null)
                 throw new ArgumentNullException(nameof(source));
-            TDestination destination = new TDestination();
-            var sourceProperties = typeof(TSource).GetProperties();// 获取源类型的属性列表
-            var destinationProperties = typeof(TDestination).GetProperties();// 获取目标类型的属性列表
-            foreach (var destProp in destinationProperties)
+
+            var sourceType = typeof(TSource);
+            var destType = typeof(TDestination);
+
+            // 创建目标实例（支持有参/无参构造，自动匹配参数）
+            var destination = CreateDestinationInstance<TSource, TDestination>(source);
+
+            // 执行属性映射（有规则用规则，无则默认同名匹配）
+            MapProperties(source, destination);
+
+            return destination;
+        }
+
+        /// <summary>
+        /// 创建目标实例（无参构造优先，有参构造自动匹配参数名）
+        /// </summary>
+        private TDestination CreateDestinationInstance<TSource, TDestination>(TSource source)
+        {
+            var destType = typeof(TDestination);
+            var sourceType = typeof(TSource);
+
+            // 获取映射配置（无配置则默认匹配）
+            _mappingConfig.TryGetMappingConfig(sourceType, destType, out var typeConfig);
+
+            // 选择最佳构造函数（无参优先）
+            var ctor = GetBestConstructor(destType);
+            var parameters = ctor.GetParameters();
+            var paramValues = new object?[parameters.Length];
+
+            // 解析构造参数（有规则用规则，无则默认匹配参数名=属性名）
+            for (int i = 0; i < parameters.Length; i++)
             {
-                // 如果目标属性上有MapperIgnoreAttribute特性，则跳过该属性的映射
-                if (destProp.GetCustomAttributes(typeof(MapperIgnoreAttribute), true).Length > 0)
-                    continue;
-                var sourceProp = sourceProperties.FirstOrDefault(sp => sp.Name == destProp.Name && sp.PropertyType == destProp.PropertyType);
-                if (sourceProp != null)
+                var param = parameters[i];
+                object? paramValue = null;
+
+                // 优先用自定义映射规则
+                if (typeConfig != null)
                 {
-                    var value = sourceProp.GetValue(source);
-                    destProp.SetValue(destination, value);
+                    paramValue = typeConfig.GetCtorParamValue(param.Name!, source);
+                }
+
+                // 无规则则尝试从DI容器解析（服务依赖）
+                if (paramValue == null && _serviceProvider != null)
+                {
+                    paramValue = _serviceProvider.GetService(param.ParameterType);
+                }
+
+                // 仍无值则用参数默认值
+                if (paramValue == null && param.HasDefaultValue)
+                {
+                    paramValue = param.DefaultValue;
+                }
+
+                // 最终无值且参数不可空则抛异常
+                if (paramValue == null && !param.ParameterType.IsNullableType())
+                {
+                    throw new MiniMapperException(
+                        $"无法解析构造参数 {param.Name}（类型：{param.ParameterType}），" +
+                        $"请确保参数名与源属性名匹配，或配置构造参数映射规则");
+                }
+
+                paramValues[i] = paramValue;
+            }
+
+            // 调用构造函数创建实例
+            try
+            {
+                return (TDestination)ctor.Invoke(paramValues);
+            }
+            catch (TargetInvocationException ex)
+            {
+                throw new MiniMapperException("调用目标类型构造函数失败", ex.InnerException ?? ex);
+            }
+        }
+
+        /// <summary>
+        /// 执行属性映射（有规则用规则，无则默认同名匹配）
+        /// </summary>
+        private void MapProperties<TSource, TDestination>(TSource source, TDestination destination)
+        {
+            if (source == null || destination == null) return;
+
+            var sourceType = typeof(TSource);
+            var destType = typeof(TDestination);
+
+            // 获取映射配置（无配置则默认属性名匹配）
+            _mappingConfig.TryGetMappingConfig(sourceType, destType, out var typeConfig);
+
+            // 获取属性列表
+            var destProperties = destType.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+            var sourceProperties = sourceType.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+
+            foreach (var destProp in destProperties)
+            {
+                // 检测MapperIgnoreAttribute特性
+                // 忽略逻辑优先级：特性标记 > 配置式忽略 > 不可写属性
+                var hasIgnoreAttribute = destProp.GetCustomAttribute<MapperIgnoreAttribute>() != null;
+                var isConfigIgnored = typeConfig?.IsIgnored(destProp.Name) ?? false;
+
+                if (!destProp.CanWrite || hasIgnoreAttribute || isConfigIgnored)
+                    continue;
+
+                // 获取源属性名（有规则用规则，无则默认同名）
+                var sourcePropName = typeConfig?.GetSourcePropertyName(destProp.Name) ?? destProp.Name;
+
+                // 匹配源属性（忽略大小写）
+                var sourceProp = sourceProperties.FirstOrDefault(p =>
+                    string.Equals(p.Name, sourcePropName, StringComparison.OrdinalIgnoreCase) && p.CanRead);
+
+                if (sourceProp == null) continue;
+
+                // 类型兼容则赋值（支持隐式转换，如int→long）
+                try
+                {
+                    var sourceValue = sourceProp.GetValue(source);
+                    var destValue = Convert.ChangeType(sourceValue, destProp.PropertyType);
+                    destProp.SetValue(destination, destValue);
+                }
+                catch (InvalidCastException)
+                {
+                    // 类型不兼容则跳过
+                    continue;
+                }
+                catch (ArgumentNullException)
+                {
+                    // 源值为null且目标类型不可空则跳过
+                    if (!destProp.PropertyType.IsNullableType()) continue;
+                    destProp.SetValue(destination, null);
                 }
             }
-            return destination;
+        }
+        /// <summary>
+        /// 选择最佳构造函数（无参优先，无则选参数最多的）
+        /// </summary>
+        private ConstructorInfo GetBestConstructor(Type destType)
+        {
+            if (_ctorCache.TryGetValue(destType, out var cachedCtor))
+                return cachedCtor;
+
+            var ctors = destType.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+            if (ctors.Length == 0)
+                throw new MiniMapperException($"类型 {destType.Name} 没有公共构造函数");
+
+            // 优先无参构造，无则选参数最多的
+            var defaultCtor = ctors.FirstOrDefault(c => c.GetParameters().Length == 0);
+            var bestCtor = defaultCtor ?? ctors.OrderByDescending(c => c.GetParameters().Length).First();
+
+            _ctorCache[destType] = bestCtor;
+            return bestCtor;
         }
     }
 }

@@ -7,8 +7,7 @@ using System.Threading.Tasks;
 namespace MyMapper
 {
     //特性类需要继承自Attribute类，并且可以通过AttributeUsage特性来指定该特性的使用范围和是否允许多次使用。
-
-
+    //AllowMultiple不允许重复标记特性，AttributeTargets.Property指定只能标记在属性上
     [AttributeUsage(AttributeTargets.Property,AllowMultiple =false)]
     public class MapperIgnoreAttribute:Attribute
     {
