@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Microsoft.Extensions.Logging;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -15,7 +16,7 @@ namespace MyMapper
         private readonly IConstructorSelector _constructorSelector;
         private readonly IPropertyMapper _propertyMapper;
         private readonly IExpressionCompiler _expressionCompiler;
-
+        private readonly ILogger<MiniMapper>? _logger;
         /// <summary>
         /// 用于存储编译后的映射委托，提升性能
         /// </summary>
@@ -28,6 +29,7 @@ namespace MyMapper
             IConstructorSelector constructorSelector,
             IPropertyMapper propertyMapper,
             IExpressionCompiler expressionCompiler,
+            ILogger<MiniMapper>? logger=null,
             IServiceProvider? serviceProvider = null)
         {
             _mappingConfig = mappingConfig;
@@ -35,6 +37,7 @@ namespace MyMapper
             _propertyMapper = propertyMapper;
             _expressionCompiler = expressionCompiler;
             _serviceProvider = serviceProvider;
+            _logger = logger;
         }
 
         /// <summary>
@@ -43,16 +46,27 @@ namespace MyMapper
         public TDestination Map<TSource, TDestination>(TSource source)
         {
             if (source == null)
-                throw new ArgumentNullException(nameof(source));
-
+            {
+                _logger?.LogWarning("映射源对象为 null：{SourceType}→{DestType}", typeof(TSource), typeof(TDestination));
+                throw new ArgumentNullException(nameof(source), "源对象不能为 null");
+            }
+            var sourceType = typeof(TSource);
+            var destType = typeof(TDestination);
+            _logger?.LogDebug("开始映射：{SourceType}→{DestType}", sourceType.Name, destType.Name);
             try
             {
-                _mappingConfig.TryGetMappingConfig(typeof(TSource), typeof(TDestination), out var cfg);
+                // 优先使用表达式树编译的委托
+                _mappingConfig.TryGetMappingConfig(sourceType, destType, out var cfg);
                 var func = _expressionCompiler.Compile<TSource, TDestination>(cfg);
-                return func(source);
+                var result = func(source);
+
+                _logger?.LogInformation("映射成功（表达式树）：{SourceType}→{DestType}", sourceType.Name, destType.Name);
+                return result;
             }
-            catch
+            catch (Exception ex)
             {
+                _logger?.LogWarning(ex, "表达式树映射失败，回退到反射：{SourceType}→{DestType}", sourceType.Name, destType.Name);
+                // 回退到反射逻辑
                 return FallbackMapByReflection<TSource, TDestination>(source);
             }
         }
@@ -63,13 +77,33 @@ namespace MyMapper
         public TDestination Map<TSource, TDestination>(TSource source, TDestination destination)
         {
             if (source == null)
-                throw new ArgumentNullException(nameof(source));
+            {
+                _logger?.LogWarning("增量映射源对象为 null：{SourceType}→{DestType}", typeof(TSource), typeof(TDestination));
+                throw new ArgumentNullException(nameof(source), "源对象不能为 null");
+            }
             if (destination == null)
-                throw new ArgumentNullException(nameof(destination));
+            {
+                _logger?.LogWarning("增量映射目标对象为 null：{SourceType}→{DestType}", typeof(TSource), typeof(TDestination));
+                throw new ArgumentNullException(nameof(destination), "目标对象不能为 null");
+            }
 
-            _mappingConfig.TryGetMappingConfig(typeof(TSource), typeof(TDestination), out var cfg);
-            _propertyMapper.MapProperties(source, destination, cfg);
-            return destination;
+            var sourceType = typeof(TSource);
+            var destType = typeof(TDestination);
+            _logger?.LogDebug("开始增量映射：{SourceType}→{DestType}", sourceType.Name, destType.Name);
+
+            try
+            {
+                _mappingConfig.TryGetMappingConfig(sourceType, destType, out var cfg);
+                _propertyMapper.MapProperties(source, destination, cfg);
+
+                _logger?.LogInformation("增量映射成功：{SourceType}→{DestType}", sourceType.Name, destType.Name);
+                return destination;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "增量映射失败：{SourceType}→{DestType}", sourceType.Name, destType.Name);
+                throw new MappingExecutionException("增量映射失败", ex, sourceType, destType);
+            }
         }
 
         /// <summary>
@@ -77,10 +111,24 @@ namespace MyMapper
         /// </summary>
         private TDestination FallbackMapByReflection<TSource, TDestination>(TSource source)
         {
-            var destination = CreateDestinationInstance<TSource, TDestination>(source);
-            _mappingConfig.TryGetMappingConfig(typeof(TSource), typeof(TDestination), out var cfg);
-            _propertyMapper.MapProperties(source, destination, cfg);
-            return destination;
+            var sourceType = typeof(TSource);
+            var destType = typeof(TDestination);
+            _logger?.LogDebug("开始反射映射：{SourceType}→{DestType}", sourceType.Name, destType.Name);
+
+            try
+            {
+                var destination = CreateDestinationInstance<TSource, TDestination>(source);
+                _mappingConfig.TryGetMappingConfig(sourceType, destType, out var cfg);
+                _propertyMapper.MapProperties(source, destination, cfg);
+
+                _logger?.LogInformation("反射映射成功：{SourceType}→{DestType}", sourceType.Name, destType.Name);
+                return destination;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "反射映射失败：{SourceType}→{DestType}", sourceType.Name, destType.Name);
+                throw new MappingExecutionException("反射映射失败", ex, sourceType, destType);
+            }
         }
 
         /// <summary>
@@ -90,6 +138,7 @@ namespace MyMapper
         {
             var destType = typeof(TDestination);
             var sourceType = typeof(TSource);
+            _logger?.LogDebug("创建目标实例：{DestType}", destType.Name);
 
             _mappingConfig.TryGetMappingConfig(sourceType, destType, out var typeConfig);
 
@@ -102,27 +151,41 @@ namespace MyMapper
                 var param = parameters[i];
                 object? paramValue = null;
 
-                if (typeConfig != null)
+                try
                 {
-                    paramValue = typeConfig.GetCtorParamValue(param.Name!, source);
-                }
+                    // 从映射配置获取参数值
+                    if (typeConfig != null)
+                    {
+                        paramValue = typeConfig.GetCtorParamValue(param.Name!, source);
+                    }
 
-                if (paramValue == null && _serviceProvider != null)
+                    // 从DI容器获取参数值
+                    if (paramValue == null && _serviceProvider != null)
+                    {
+                        paramValue = _serviceProvider.GetService(param.ParameterType);
+                    }
+
+                    // 使用默认值
+                    if (paramValue == null && param.HasDefaultValue)
+                    {
+                        paramValue = param.DefaultValue;
+                    }
+
+                    // 检查必填参数
+                    if (paramValue == null && !param.ParameterType.IsNullableType())
+                    {
+                        throw new MappingExecutionException($"无法解析构造参数 {param.Name}（类型：{param.ParameterType.Name}）",
+                            null, sourceType, destType);
+                    }
+
+                    paramValues[i] = paramValue;
+                    _logger?.LogTrace("构造参数赋值：{ParamName} = {ParamValue}", param.Name, paramValue ?? "null");
+                }
+                catch (Exception ex)
                 {
-                    paramValue = _serviceProvider.GetService(param.ParameterType);
+                    _logger?.LogError(ex, "构造参数解析失败：{ParamName}", param.Name);
+                    throw;
                 }
-
-                if (paramValue == null && param.HasDefaultValue)
-                {
-                    paramValue = param.DefaultValue;
-                }
-
-                if (paramValue == null && !param.ParameterType.IsNullableType())
-                {
-                    throw new MiniMapperException($"无法解析构造参数 {param.Name}（类型：{param.ParameterType}）");
-                }
-
-                paramValues[i] = paramValue;
             }
 
             try
@@ -131,7 +194,7 @@ namespace MyMapper
             }
             catch (TargetInvocationException ex)
             {
-                throw new MiniMapperException("创建目标实例失败", ex.InnerException);
+                throw new MappingExecutionException("创建目标实例失败", ex.InnerException, sourceType, destType);
             }
         }
     }

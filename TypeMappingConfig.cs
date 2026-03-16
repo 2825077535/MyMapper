@@ -15,8 +15,8 @@ namespace MyMapper
 
         // 自定义规则存储
         private readonly Dictionary<string, Func<object, object?>> _ctorParamMappings = new();
-        private readonly Dictionary<string, string> _propertyMappings = new();
-        private readonly HashSet<string> _ignoredProperties = new();
+        public readonly Dictionary<string, string> _propertyMappings = new();
+        public readonly HashSet<string> _ignoredProperties = new();
 
         public TypeMappingConfig(MappingConfiguration rootConfig, Type sourceType, Type destType)
         {

@@ -14,6 +14,12 @@ services.AddMiniMapper(config =>
 var serviceProvider = services.BuildServiceProvider();
 var mapper = serviceProvider.GetRequiredService<IMapper>();
 
+
+var mappingConfig=serviceProvider.GetRequiredService<MappingConfiguration>();
+
+mappingConfig.Validate();
+
+Console.WriteLine(mappingConfig.GetDiagnostics());
 // ===================== 测试1：正向映射（User → UserDto） =====================
 Console.WriteLine("===== 正向映射（User → UserDto） =====");
 var sourceUser = new User
@@ -26,6 +32,8 @@ var sourceUser = new User
     NickName = "小张"     // 自定义映射
 };
 var userDto = mapper.Map<User, UserDto>(sourceUser);
+
+
 
 // 验证正向映射结果
 Console.WriteLine($"Id: {userDto.Id} (预期：1001) ");
