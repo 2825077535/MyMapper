@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
@@ -13,6 +14,10 @@ namespace MyMapper
         private readonly IServiceProvider? _serviceProvider;
         private readonly Dictionary<Type, ConstructorInfo> _ctorCache = new();
 
+        /// <summary>
+        /// 用于存储编译后的映射委托，提升性能
+        /// </summary>
+        private readonly Dictionary<(Type Soure,Type Dest),Delegate> _compiledMaps = new();
         public MiniMapper(MappingConfiguration mappingConfig, IServiceProvider? serviceProvider = null)
         {
             _mappingConfig = mappingConfig;
@@ -27,18 +32,96 @@ namespace MyMapper
             if (source == null)
                 throw new ArgumentNullException(nameof(source));
 
+            try
+            {
+                var func = CompileMapper<TSource, TDestination>();
+                return func(source);
+            }
+            catch
+            {
+                // 编译失败回退到原有反射逻辑
+                return FallbackMapByReflection<TSource, TDestination>(source);
+            }
+        }
+        /// <summary>
+        /// 创建并编译映射表达式，生成高性能映射委托
+        /// </summary>
+        /// <typeparam name="TSource"></typeparam>
+        /// <typeparam name="TDestination"></typeparam>
+        /// <returns></returns>
+        private Func<TSource, TDestination> CompileMapper<TSource, TDestination>()
+        {
+            var key = (typeof(TSource), typeof(TDestination));
+
+            // 缓存命中直接返回
+            if (_compiledMaps.TryGetValue(key, out var existing))
+                return (Func<TSource, TDestination>)existing;
+
+            // 获取映射配置
+            _mappingConfig.TryGetMappingConfig(typeof(TSource), typeof(TDestination), out var cfg);
+
+            // 构建表达式参数：source
+            ParameterExpression sourceParam = Expression.Parameter(typeof(TSource), "source");
+
+            // 创建目标对象（无参构造）
+            ConstructorInfo ctor = GetBestConstructor(typeof(TDestination));
+            NewExpression newDest = Expression.New(ctor);
+
+            // 收集属性绑定
+            List<MemberBinding> bindings = new List<MemberBinding>();
+            foreach (var destProp in typeof(TDestination).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                // 跳过不可写、特性忽略、配置忽略的属性
+                if (!destProp.CanWrite) continue;
+                bool hasIgnoreAttr = destProp.GetCustomAttribute<MapperIgnoreAttribute>() != null;
+                if (hasIgnoreAttr) continue;
+                bool isConfigIgnored = cfg?.IsIgnored(destProp.Name) ?? false;
+                if (isConfigIgnored) continue;
+
+                // 找源属性（自定义规则→默认同名）
+                string sourcePropName = cfg?.GetSourcePropertyName(destProp.Name) ?? destProp.Name;
+                var sourceProp = typeof(TSource).GetProperty(sourcePropName,
+                    BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+                if (sourceProp == null) continue;
+
+                // 构建属性访问表达式
+                MemberExpression sourcePropAccess = Expression.Property(sourceParam, sourceProp);
+
+                // 类型匹配则添加绑定
+                if (sourceProp.PropertyType == destProp.PropertyType)
+                {
+                    bindings.Add(Expression.Bind(destProp, sourcePropAccess));
+                }
+            }
+
+            // 构建对象初始化表达式
+            MemberInitExpression init = Expression.MemberInit(newDest, bindings);
+
+            // 编译为委托并缓存
+            Expression<Func<TSource, TDestination>> lambda =
+                Expression.Lambda<Func<TSource, TDestination>>(init, sourceParam);
+            Func<TSource, TDestination> func = lambda.Compile();
+            _compiledMaps[key] = func;
+
+            return func;
+        }
+        /// <summary>
+        /// 如果编译失败，回退到原有反射实现
+        /// </summary>
+        /// <typeparam name="TSource"></typeparam>
+        /// <typeparam name="TDestination"></typeparam>
+        /// <param name="source"></param>
+        /// <returns></returns>
+        private TDestination FallbackMapByReflection<TSource, TDestination>(TSource source)
+        {
             var sourceType = typeof(TSource);
             var destType = typeof(TDestination);
 
-            // 创建目标实例（支持有参/无参构造，自动匹配参数）
             var destination = CreateDestinationInstance<TSource, TDestination>(source);
-
-            // 执行属性映射（有规则用规则，无则默认同名匹配）
             MapProperties(source, destination);
 
             return destination;
         }
-
         /// <summary>
         /// 创建目标实例（无参构造优先，有参构造自动匹配参数名）
         /// </summary>
