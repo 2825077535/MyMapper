@@ -4,19 +4,15 @@ using MyMapper;
 
 // 1. 初始化DI容器并配置双向映射
 var services = new ServiceCollection();
-var mappingConfig = new MappingConfiguration();
-
-// 配置正向映射（User → UserDto）+ 反向映射（UserDto → User）
-mappingConfig.CreateMap<User, UserDto>()
-    .ForMember("Alias", "NickName")  // 自定义属性映射
-    .IgnoreMember("Extra")           // 配置式忽略属性
-    .ReverseMap()                    // 生成反向映射，自动复用规则
-        .IgnoreMember("NickName");   // 反向映射自定义忽略（可选）
-
-services.AddSingleton(mappingConfig);
-services.AddSingleton<MiniMapper>();
+services.AddMiniMapper(config =>
+{
+    config.CreateMap<User, UserDto>()
+        .ForMember("Alias", "NickName")
+        .IgnoreMember("Extra")
+        .ReverseMap();
+});
 var serviceProvider = services.BuildServiceProvider();
-var mapper = serviceProvider.GetRequiredService<MiniMapper>();
+var mapper = serviceProvider.GetRequiredService<IMapper>();
 
 // ===================== 测试1：正向映射（User → UserDto） =====================
 Console.WriteLine("===== 正向映射（User → UserDto） =====");
@@ -39,6 +35,12 @@ Console.WriteLine($"Secret: '{userDto.Secret}' (预期：空) ");
 Console.WriteLine($"Extra: '{userDto.Extra}' (预期：空) ");
 Console.WriteLine($"Alias: {userDto.Alias} (预期：小张) ");
 
+var existingDto = new UserDto { Id = 0, UserName = "默认名称" };
+var updatedDto = mapper.Map(sourceUser, existingDto);
+
+
+Console.WriteLine("增量映射结果，只更新字段，不创建新对象：");
+Console.WriteLine($"Id: {updatedDto.Id}, UserName: {updatedDto.UserName} (覆盖原有值)\n");
 // ===================== 测试2：反向映射（UserDto → User） =====================
 Console.WriteLine("\n===== 反向映射（UserDto → User） =====");
 // 修改UserDto数据，验证反向映射

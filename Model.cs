@@ -24,10 +24,19 @@ namespace MyMapper
         public static IServiceCollection AddMiniMapper(this IServiceCollection services,
             Action<MappingConfiguration> configure)
         {
+            // 1. 注册映射配置
             var mappingConfig = new MappingConfiguration();
             configure(mappingConfig);
             services.AddSingleton(mappingConfig);
-            services.AddSingleton<MiniMapper>();
+
+            // 2. 注册策略接口
+            services.AddSingleton<IConstructorSelector, DefaultConstructorSelector>();
+            services.AddSingleton<IPropertyMapper, DefaultPropertyMapper>();
+            services.AddSingleton<IExpressionCompiler, DefaultExpressionCompiler>();
+
+            // 3. 注册核心映射器
+            services.AddSingleton<IMapper, MiniMapper>();
+
             return services;
         }
     }
