@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -22,22 +23,67 @@ namespace MyMapper
     public static class MiniMapperDependencyInjection
     {
         public static IServiceCollection AddMiniMapper(this IServiceCollection services,
-            Action<MappingConfiguration> configure)
+            Action<MappingConfiguration> configure,
+            Action<TypeConverterRegistry>? configureConverters = null)
         {
-            // 1. 注册映射配置
+            //配置映射规则
             var mappingConfig = new MappingConfiguration();
             configure(mappingConfig);
+
+            // 配置类型转换器
+            var converterRegistry = new TypeConverterRegistry();
+            configureConverters?.Invoke(converterRegistry);
+
+            // 注册核心服务（单例）
             services.AddSingleton(mappingConfig);
-
-            // 2. 注册策略接口
+            services.AddSingleton(converterRegistry);
             services.AddSingleton<IConstructorSelector, DefaultConstructorSelector>();
-            services.AddSingleton<IPropertyMapper, DefaultPropertyMapper>();
-            services.AddSingleton<IExpressionCompiler, DefaultExpressionCompiler>();
-
-            // 3. 注册核心映射器
             services.AddSingleton<IMapper, MiniMapper>();
 
+            services.AddSingleton<IPropertyMapper>(provider =>
+                new DefaultPropertyMapper(
+                    provider.GetService<ILogger<DefaultPropertyMapper>>(),
+                    provider.GetService<MappingConfiguration>(),
+                    provider.GetService<TypeConverterRegistry>(),
+                    provider.GetService<Lazy<IMapper>>() // 延迟解析，避免循环依赖
+                ));
+            services.AddSingleton<IExpressionCompiler, DefaultExpressionCompiler>();
+
             return services;
+        }
+    }
+
+    /// <summary>用户状态枚举（转换器示例用）</summary>
+    public enum UserStatus
+    {
+        Inactive = 0,
+        Active = 1,
+        Locked = 2
+    }
+
+    /// <summary>
+    /// 常用转换器
+    /// </summary>
+    public static class BuiltInConverters
+    {
+        /// <summary>DateTime → string（yyyy-MM-dd）</summary>
+        public class DateTimeToStringConverter : ITypeConverter<DateTime, string>
+        {
+            public string Convert(DateTime source, string? destination, TypeMappingConfig? mappingConfig)
+            {
+                return source.ToString("yyyy-MM-dd");
+            }
+        }
+
+        /// <summary>int → UserStatus（枚举）</summary>
+        public class IntToUserStatusConverter : ITypeConverter<int, UserStatus>
+        {
+            public UserStatus Convert(int source, UserStatus destination, TypeMappingConfig? mappingConfig)
+            {
+                return Enum.IsDefined(typeof(UserStatus), source)
+                    ? (UserStatus)source
+                    : UserStatus.Inactive;
+            }
         }
     }
 }

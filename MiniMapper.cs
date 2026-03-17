@@ -55,8 +55,12 @@ namespace MyMapper
             _logger?.LogDebug("开始映射：{SourceType}→{DestType}", sourceType.Name, destType.Name);
             try
             {
-                // 优先使用表达式树编译的委托
                 _mappingConfig.TryGetMappingConfig(sourceType, destType, out var cfg);
+                // 如果有条件映射 / 复杂集合映射等高级特性，则直接走反射
+                if (cfg != null && cfg._propertyConditions.Count > 0)
+                {
+                    return FallbackMapByReflection<TSource, TDestination>(source);
+                }
                 var func = _expressionCompiler.Compile<TSource, TDestination>(cfg);
                 var result = func(source);
 
@@ -66,14 +70,11 @@ namespace MyMapper
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "表达式树映射失败，回退到反射：{SourceType}→{DestType}", sourceType.Name, destType.Name);
-                // 回退到反射逻辑
                 return FallbackMapByReflection<TSource, TDestination>(source);
             }
         }
 
-        /// <summary>
-        /// 增量映射结果，只更新字段，不创建新对象
-        /// </summary>
+        /// <summary>增量映射（更新已有对象）</summary>
         public TDestination Map<TSource, TDestination>(TSource source, TDestination destination)
         {
             if (source == null)
@@ -106,9 +107,72 @@ namespace MyMapper
             }
         }
 
+        /// <summary>集合映射（新建集合）</summary>
+        public List<TDestination> Map<TSource, TDestination>(IEnumerable<TSource> source)
+        {
+            if (source == null)
+            {
+                _logger?.LogWarning("集合映射源为 null：{SourceType}→{DestType}", typeof(TSource), typeof(TDestination));
+                throw new ArgumentNullException(nameof(source));
+            }
+
+            _logger?.LogInformation("开始集合映射：IEnumerable<{SourceType}>→List<{DestType}>", typeof(TSource).Name, typeof(TDestination).Name);
+
+            var result = new List<TDestination>();
+            foreach (var item in source)
+            {
+                if (item == null)
+                {
+                    _logger?.LogTrace("跳过null元素：{SourceType}", typeof(TSource).Name);
+                    continue;
+                }
+                var destItem = Map<TSource, TDestination>(item);
+                result.Add(destItem);
+            }
+
+            _logger?.LogInformation("集合映射完成：共映射 {Count} 个元素", result.Count);
+            return result;
+        }
+
+        /// <summary>增量集合映射（更新已有集合）</summary>
+        public void Map<TSource, TDestination>(IEnumerable<TSource> source, ICollection<TDestination> destination)
+        {
+            if (source == null)
+            {
+                _logger?.LogWarning("增量集合映射源为 null：{SourceType}→{DestType}", typeof(TSource), typeof(TDestination));
+                throw new ArgumentNullException(nameof(source));
+            }
+            if (destination == null)
+            {
+                _logger?.LogWarning("增量集合映射目标为 null：{SourceType}→{DestType}", typeof(TSource), typeof(TDestination));
+                throw new ArgumentNullException(nameof(destination));
+            }
+
+            _logger?.LogInformation("开始增量集合映射：IEnumerable<{SourceType}>→ICollection<{DestType}>", typeof(TSource).Name, typeof(TDestination).Name);
+
+            destination.Clear(); // 清空原有数据
+            foreach (var item in source)
+            {
+                if (item == null)
+                {
+                    _logger?.LogTrace("跳过null元素：{SourceType}", typeof(TSource).Name);
+                    continue;
+                }
+                var destItem = Map<TSource, TDestination>(item);
+                destination.Add(destItem);
+            }
+
+            _logger?.LogInformation("增量集合映射完成：共更新 {Count} 个元素", destination.Count);
+        }
+
         /// <summary>
         /// 反射兜底逻辑
         /// </summary>
+        /// <typeparam name="TSource"></typeparam>
+        /// <typeparam name="TDestination"></typeparam>
+        /// <param name="source"></param>
+        /// <returns></returns>
+        /// <exception cref="MappingExecutionException"></exception>
         private TDestination FallbackMapByReflection<TSource, TDestination>(TSource source)
         {
             var sourceType = typeof(TSource);

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using static MyMapper.PropertyMapCondition;
 
 namespace MyMapper
 {
@@ -17,6 +18,7 @@ namespace MyMapper
         private readonly Dictionary<string, Func<object, object?>> _ctorParamMappings = new();
         public readonly Dictionary<string, string> _propertyMappings = new();
         public readonly HashSet<string> _ignoredProperties = new();
+        public readonly Dictionary<string, PropertyMapConditionDelegate<object, object>?> _propertyConditions = new();
 
         public TypeMappingConfig(MappingConfiguration rootConfig, Type sourceType, Type destType)
         {
@@ -48,7 +50,34 @@ namespace MyMapper
             _propertyMappings[destPropertyName] = sourcePropertyName;
             return this;
         }
+        /// <summary>
+        /// 配置带条件的属性映射
+        /// </summary>
+        public TypeMappingConfig ForMemberWhen<TSource, TDestination>(
+            string destPropertyName,
+            string sourcePropertyName,
+            PropertyMapConditionDelegate<TSource, TDestination> condition)
+        {
+            // 先注册基础属性映射
+            ForMember(destPropertyName, sourcePropertyName);
 
+            // 包装委托为通用类型（兼容不同TSource/TDestination）
+            _propertyConditions[destPropertyName] = (source, destination, sourceValue) =>
+                condition((TSource)source, (TDestination?)destination, sourceValue);
+
+            return this;
+        }
+        /// <summary>
+        /// 检查属性是否满足映射条件
+        /// </summary>
+        public bool ShouldMapProperty(string destPropertyName, object source, object? destination, object? sourceValue)
+        {
+            if (_propertyConditions.TryGetValue(destPropertyName, out var condition))
+            {
+                return condition?.Invoke(source, destination, sourceValue) ?? true;
+            }
+            return true; // 默认无条件映射
+        }
         public TypeMappingConfig IgnoreMember(string destPropertyName)
         {
             _ignoredProperties.Add(destPropertyName);
