@@ -66,11 +66,7 @@ namespace MyMapper
             _lazyMapper = lazyMapper;
         }
 
-        public void MapProperties<TSource, TDestination>(
-            TSource source,
-            TDestination destination,
-            TypeMappingConfig? mappingConfig,
-            int currentDepth = 0)
+        public void MapProperties<TSource, TDestination>(TSource source, TDestination destination, TypeMappingConfig? mappingConfig)
         {
             if (source == null || destination == null)
             {
@@ -79,8 +75,8 @@ namespace MyMapper
             }
             var sourceType = typeof(TSource);
             var destType = typeof(TDestination);
-            _logger?.LogDebug("开始属性映射：{SourceType}→{DestType}（深度：{Depth}）",
-                sourceType.Name, destType.Name, currentDepth);
+            _logger?.LogDebug("开始属性映射：{SourceType}→{DestType}）",
+                sourceType.Name, destType.Name);
 
             var destProperties = destType.GetProperties(BindingFlags.Public | BindingFlags.Instance);
             var sourceProperties = sourceType.GetProperties(BindingFlags.Public | BindingFlags.Instance);
@@ -201,8 +197,8 @@ namespace MyMapper
                             }
                             var genericMapMethod = typeof(IMapper).GetMethod("Map", new[] { sourceValueType, destPropType });
                             destValue = genericMapMethod.Invoke(mapper, new[] { sourceValue, currentDestValue });
-                            _logger?.LogTrace("递归映射复杂类型：{SourceType}→{DestType}（深度：{NewDepth}）",
-                                sourceValueType.Name, destPropType.Name, currentDepth + 1);
+                            _logger?.LogTrace("递归映射复杂类型：{SourceType}→{DestType}",
+                                sourceValueType.Name, destPropType.Name);
                         }
                     }
                     // 默认类型转换
